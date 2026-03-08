@@ -2,27 +2,28 @@ module pe #(
     parameter DATA_WIDTH = 16,
     parameter PSUM_WIDTH = 32
 )(
+    // Global inputs
     input logic clk,
     input logic rst,
     input logic en,
     
-    // Control signals propagating through the array
-    input logic shift_weight_in, // Shift weights down (North)
-    input logic load_weight_in, // Swap shadow to active (West)
-    
-    // Data flowing through the array
-    input logic valid_in, // Data validity flag (West)
-    input logic signed [DATA_WIDTH-1:0] input_in, // Activations (West)
-    input logic signed [DATA_WIDTH-1:0] weight_in, // Streaming weights (North)
-    input logic signed [PSUM_WIDTH-1:0] psum_in, // Partial sums (North)
+    // Double buffering control signals
+    input logic shift_weight_in,
+    input logic load_weight_in,
 
-    // Propagating outputs
-    output logic shift_weight_out, // Pass shift down to South PE
-    output logic load_weight_out, // Pass load across to East PE
-    output logic valid_out, // Pass validity across to East PE
-    output logic signed [DATA_WIDTH-1:0] input_out, // Pass activations to East PE
-    output logic signed [DATA_WIDTH-1:0] weight_out, // Pass weights to South PE
-    output logic signed [PSUM_WIDTH-1:0] psum_out // Accumulation result
+    // Data inputs
+    input logic valid_in,
+    input logic signed [DATA_WIDTH-1:0] input_in,
+    input logic signed [DATA_WIDTH-1:0] weight_in,
+    input logic signed [PSUM_WIDTH-1:0] psum_in,
+
+    // Outputs
+    output logic shift_weight_out,
+    output logic load_weight_out,
+    output logic valid_out,
+    output logic signed [DATA_WIDTH-1:0] input_out,
+    output logic signed [DATA_WIDTH-1:0] weight_out,
+    output logic signed [PSUM_WIDTH-1:0] psum_out
 );
     // 1. Weight Registers (Double Buffering)
     logic signed [DATA_WIDTH-1:0] shadow_weight_reg;
@@ -47,23 +48,7 @@ module pe #(
     
     assign weight_out = shadow_weight_reg;
 
-    // 2. 2-stage Delay Registers for Data Alignment 
-    logic [1:0] valid_pipeline;
-    logic signed [DATA_WIDTH-1:0] input_pipeline [1:0];
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            valid_pipeline <= '0;
-            input_pipeline[0] <= '0;
-            input_pipeline[1] <= '0;
-        end else if (en) begin
-            valid_pipeline <= {valid_pipeline[0], valid_in};
-            input_pipeline[0] <= input_in;
-            input_pipeline[1] <= input_pipeline[0];
-        end
-    end
-
-    // 3. Output Registers
+    // 2. Output Registers
     always_ff @(posedge clk) begin
         if (rst) begin
             input_out <= 16'b0;
@@ -72,10 +57,10 @@ module pe #(
         end 
 
         else if (en) begin
-            input_out <= input_pipeline[1];
-            valid_out <= valid_pipeline[1];
+            input_out <= input_in;
+            valid_out <= valid_in;
 
-            if (valid_pipeline[1]) begin
+            if (valid_in) begin
                 psum_out <= mac_out;
             end 
             
@@ -85,28 +70,24 @@ module pe #(
         end
     end
     
-    // 4. MAC Operation Data Paths
+    // 3. MAC Operation Data Paths
     logic signed [PSUM_WIDTH-1:0] mult_out;
     logic signed [PSUM_WIDTH-1:0] mac_out;
     logic mult_overflow;
     logic add_overflow;
 
-    // Fixed-Point Pipelined Multiplier (2-cycle latency)
-    fxp_mul_pipe #(
+    fxp_mul #(
         .WIIA(DATA_WIDTH/2), .WIFA(DATA_WIDTH/2),
         .WIIB(DATA_WIDTH/2), .WIFB(DATA_WIDTH/2),
         .WOI(PSUM_WIDTH/2),  .WOF(PSUM_WIDTH/2),
         .ROUND(1)
     ) mult (
-        .clk(clk),
-        .rstn(~rst),
         .ina(input_in),
         .inb(active_weight_reg),
         .out(mult_out),
         .overflow(mult_overflow)
     );
 
-    // Fixed-Point Combinational Adder (0-cycle latency)
     fxp_add #(
         .WIIA(PSUM_WIDTH/2), .WIFA(PSUM_WIDTH/2),
         .WIIB(PSUM_WIDTH/2), .WIFB(PSUM_WIDTH/2),
